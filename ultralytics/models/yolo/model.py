@@ -19,6 +19,7 @@ from ultralytics.nn.tasks import (
     WorldModel,
     YOLOEModel,
     YOLOESegModel,
+    JDEModel,
 )
 from ultralytics.utils import ROOT, YAML
 
@@ -115,6 +116,12 @@ class YOLO(Model):
                 "validator": yolo.obb.OBBValidator,
                 "predictor": yolo.obb.OBBPredictor,
             },
+            "jde": {
+                "model": JDEModel,
+                "trainer": yolo.jde.JDETrainer,
+                "validator": yolo.detect.DetectionValidator,
+                "predictor": yolo.jde.JDEPredictor
+            }
         }
 
 

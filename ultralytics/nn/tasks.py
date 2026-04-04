@@ -72,6 +72,7 @@ from ultralytics.nn.modules import (
     YOLOESegment,
     YOLOESegment26,
     v10Detect,
+    JDE,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER, WINDOWS, YAML, colorstr, emojis
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -80,6 +81,7 @@ from ultralytics.utils.loss import (
     PoseLoss26,
     v8ClassificationLoss,
     v8DetectionLoss,
+    v8JdeLoss,
     v8OBBLoss,
     v8PoseLoss,
     v8SegmentationLoss,
@@ -512,6 +514,39 @@ class DetectionModel(BaseModel):
     def init_criterion(self):
         """Initialize the loss criterion for the DetectionModel."""
         return E2ELoss(self) if getattr(self, "end2end", False) else v8DetectionLoss(self)
+
+
+class JDEModel(DetectionModel):
+    """ YOLO 检测和特征提取模型.
+    
+    This class implements the YOLO JDE architecture, handling model initialization, forward pass, augmented
+    inference, and loss computation for object detection tasks.
+
+    Attributes:
+        yaml (dict): Model configuration dictionary.
+        model (torch.nn.Sequential): The neural network model.
+        save (list): List of layer indices to save outputs from.
+        names (dict): Class names dictionary.
+        inplace (bool): Whether to use inplace operations.
+        end2end (bool): Whether the model uses end-to-end detection.
+        stride (torch.Tensor): Model stride values.
+
+    Methods:
+        __init__: Initialize the YOLO detection model.
+        _predict_augment: Perform augmented inference.
+        _descale_pred: De-scale predictions following augmented inference.
+        _clip_augmented: Clip YOLO augmented inference tails.
+        init_criterion: Initialize the loss criterion.
+
+    Examples:
+        Initialize a detection model
+        >>> model = DetectionModel("yolo26n.yaml", ch=3, emb=128, nc=80)
+        >>> results = model.predict(image_tensor)
+    """
+    def init_criterion(self):
+        if getattr(self, "end2end", False):
+            raise NotImplementedError
+        return v8JdeLoss(self)
 
 
 class OBBModel(DetectionModel):
@@ -1691,12 +1726,13 @@ def parse_model(d, ch, verbose=True):
                 Pose26,
                 OBB,
                 OBB26,
+                JDE,
             }
         ):
             args.extend([reg_max, end2end, [ch[x] for x in f]])
             if m is Segment or m is YOLOESegment or m is Segment26 or m is YOLOESegment26:
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
-            if m in {Detect, YOLOEDetect, Segment, Segment26, YOLOESegment, YOLOESegment26, Pose, Pose26, OBB, OBB26}:
+            if m in {Detect, YOLOEDetect, Segment, Segment26, YOLOESegment, YOLOESegment26, Pose, Pose26, OBB, OBB26, JDE,}:
                 m.legacy = legacy
         elif m is v10Detect:
             args.append([ch[x] for x in f])
@@ -1792,6 +1828,8 @@ def guess_model_task(model):
             return "pose"
         if "obb" in m:
             return "obb"
+        if "jde" in m:
+            return "jde"
 
     # Guess from model cfg
     if isinstance(model, dict):
@@ -1814,6 +1852,8 @@ def guess_model_task(model):
                 return "pose"
             elif isinstance(m, OBB):
                 return "obb"
+            elif isinstance(m, JDE):
+                return "jde"
             elif isinstance(m, (Detect, WorldDetect, YOLOEDetect, v10Detect)):
                 return "detect"
 
@@ -1828,6 +1868,8 @@ def guess_model_task(model):
             return "pose"
         elif "-obb" in model.stem or "obb" in model.parts:
             return "obb"
+        elif "-jde" in model.stem or "jde" in model.parts:
+            return "jde"
         elif "detect" in model.parts:
             return "detect"
 

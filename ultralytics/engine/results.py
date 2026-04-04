@@ -14,6 +14,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from ultralytics.data.augment import LetterBox
 from ultralytics.utils import LOGGER, DataExportMixin, SimpleClass, ops
@@ -230,6 +231,7 @@ class Results(SimpleClass, DataExportMixin):
         probs: torch.Tensor | None = None,
         keypoints: torch.Tensor | None = None,
         obb: torch.Tensor | None = None,
+        embeds: torch.Tensor | None = None,
         speed: dict[str, float] | None = None,
     ) -> None:
         """Initialize the Results class for storing and manipulating inference results.
@@ -259,6 +261,7 @@ class Results(SimpleClass, DataExportMixin):
         self.probs = Probs(probs) if probs is not None else None
         self.keypoints = Keypoints(keypoints, self.orig_shape) if keypoints is not None else None
         self.obb = OBB(obb, self.orig_shape) if obb is not None else None
+        self.embeds = Embeddings(embeds) if embeds is not None else None
         self.speed = speed if speed is not None else {"preprocess": None, "inference": None, "postprocess": None}
         self.names = names
         self.path = path
@@ -1531,3 +1534,49 @@ class OBB(BaseTensor):
             if isinstance(x, torch.Tensor)
             else np.stack([x.min(1), y.min(1), x.max(1), y.max(1)], -1)
         )
+
+
+class Embeddings(BaseTensor):
+    """
+    A class for managing and manipulating detection embeddings.
+
+    This class provides functionality for handling detection embeddings, including a method for their normalization.
+
+    Attributes:
+        data (torch.Tensor | numpy.ndarray): The raw tensor containing detection embeddings.
+
+    Methods:
+        cpu(): Returns a copy of the object with all tensors on CPU memory.
+        numpy(): Returns a copy of the object with all tensors as numpy arrays.
+        cuda(): Returns a copy of the object with all tensors on GPU memory.
+        to(*args, **kwargs): Returns a copy of the object with tensors on specified device and dtype.
+        normalize(): Normalizes the embeddings to have a unit norm.
+    """
+
+    def __init__(self, embeddings) -> None:
+        """
+        Initialize the Embeddings class with detection embeddings.
+
+        This class manages detection embeddings, providing easy access and manipulation of the embeddings.
+
+        Args:
+            embeddings (torch.Tensor | np.ndarray): A tensor or numpy array with detection embeddings of shape (num_boxes, embedding_dim).
+
+        Examples:
+            >>> import torch
+            >>> embeddings = torch.rand(10, 256)  # 10 embeddings of 256 dimensions
+            >>> embeddings_obj = Embeddings(embeddings)
+        """
+        super().__init__(embeddings, orig_shape=None)
+
+    def normalize(self):
+        """
+        Normalizes the embeddings to have a unit norm.
+
+        Args:
+            None
+
+        Returns:
+            (Embeddings): A copy of the Embeddings object with normalized embeddings.
+        """
+        return Embeddings(F.normalize(self.data, p=2, dim=1))

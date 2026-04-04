@@ -13,9 +13,33 @@ from ultralytics.utils.metrics import OKS_SIGMA, RLE_WEIGHT
 from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh
 from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import autocast
-
+from pytorch_metric_learning import miners, losses
 from .metrics import bbox_iou, probiou
 from .tal import bbox2dist, rbox2dist
+
+
+class MetricLearningLoss(nn.Module):
+    def __init__(self):
+        super(MetricLearningLoss, self).__init__()
+        self.mining_func = miners.BatchEasyHardMiner(pos_strategy='hard', neg_strategy='semihard')
+        self.loss_func = losses.TripletMarginLoss(margin=0.075)
+        self.confidence_threshold = 1
+
+    def forward(self, embeddings, tags, confidences=None, normalize=False):
+        # Select only the embeddings and tags for confidences on top X%
+        if confidences is not None and self.confidence_threshold<1:
+            top_k = int(self.confidence_threshold * len(confidences))
+            _, indices = torch.topk(confidences, top_k, largest=True)
+            embeddings = embeddings[indices]
+            tags = tags[indices]
+
+        if normalize:
+            embeddings = F.normalize(embeddings, p=2, dim=1)
+        # Sample triplets and calculate loss
+        indices_tuples = self.mining_func(embeddings, tags)
+        loss = self.loss_func(embeddings, tags, indices_tuples)
+        #loss = self.loss_func(embeddings, tags)
+        return loss
 
 
 class VarifocalLoss(nn.Module):
@@ -468,6 +492,92 @@ class v8DetectionLoss:
         loss, loss_detach = self.get_assigned_targets_and_loss(preds, batch)[1:]
         return loss * batch_size, loss_detach
 
+class v8JdeLoss(v8DetectionLoss):
+    """Criterion class for computing training losses for YOLOv8 Joint detection and embedding."""
+    def __init__(self, model, tal_topk = 10, tal_topk2 = None, level='image'):
+        super().__init__(model, tal_topk, tal_topk2)
+        self.emb_loss = MetricLearningLoss().to(self.device)
+        self.level = level
+    
+    def get_assigned_targets_and_loss(self, preds: dict[str, torch.Tensor], batch: dict[str, Any]) -> tuple:
+        """Calculate the sum of the loss for box, cls and dfl multiplied by batch size and return foreground mask and
+        target indices.
+        """
+        loss = torch.zeros(4, device=self.device)  # box, cls, dfl
+        pred_distri, pred_scores, pred_embs = (
+            preds["boxes"].permute(0, 2, 1).contiguous(),
+            preds["scores"].permute(0, 2, 1).contiguous(),
+            preds['embs'].permute(0, 2, 1).contiguous()
+        )
+        anchor_points, stride_tensor = make_anchors(preds["feats"], self.stride, 0.5)
+
+        dtype = pred_scores.dtype
+        batch_size = pred_scores.shape[0]
+        imgsz = torch.tensor(preds["feats"][0].shape[2:], device=self.device, dtype=dtype) * self.stride[0]
+
+        # Targets
+        targets = torch.cat((batch["batch_idx"].view(-1, 1), batch["cls"].view(-1, 1), batch["bboxes"]), 1)
+        targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
+        gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
+        mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
+
+        # Pboxes
+        pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
+
+        target_labels, target_bboxes, target_scores, fg_mask, target_gt_idx = self.assigner(
+            pred_scores.detach().sigmoid(),
+            (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
+            anchor_points * stride_tensor,
+            gt_labels,
+            gt_bboxes,
+            mask_gt,
+        )
+
+        target_scores_sum = max(target_scores.sum(), 1)
+
+        # Cls loss
+        loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+
+        # Bbox loss
+        if fg_mask.sum():
+            loss[0], loss[2] = self.bbox_loss(
+                pred_distri,
+                pred_bboxes,
+                anchor_points,
+                target_bboxes / stride_tensor,
+                target_scores,
+                target_scores_sum,
+                fg_mask,
+                imgsz,
+                stride_tensor,
+            )
+
+            # embedding loss
+            if self.level == "batch":
+                pred_embs = pred_embs[fg_mask]  # (batch_fg_objects, embed_dim)
+                target_tags = target_labels[fg_mask]  # (batch_fg_objects, 1)
+                confidences = pred_scores[fg_mask].sigmoid().view(-1)   # (batch_fg_objects,)
+                loss[3] = self.emb_loss(pred_embs, target_tags, confidences)
+            else:
+                loss_sum = 0
+                for i in range(batch_size):
+                    fg_m_image = fg_mask[i]
+                    if fg_m_image.sum():
+                        pred_embed = pred_embs[i][fg_m_image]
+                        target_tag = target_labels[i][fg_m_image]
+                        confidence = pred_scores[i][fg_m_image].sigmoid().view(-1)
+                        loss_sum += self.emb_loss(pred_embed, target_tag, confidence)
+                loss[3] = loss_sum / batch_size
+
+        loss[0] *= self.hyp.box  # box gain
+        loss[1] *= self.hyp.cls  # cls gain
+        loss[2] *= self.hyp.dfl  # dfl gain
+        loss[3] *= self.hyp.cls  # emb gain
+        return (
+            (fg_mask, target_gt_idx, target_bboxes, anchor_points, stride_tensor),
+            loss,
+            loss.detach(),
+        )  # loss(box, cls, dfl)
 
 class v8SegmentationLoss(v8DetectionLoss):
     """Criterion class for computing training losses for YOLOv8 segmentation."""

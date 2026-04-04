@@ -20,7 +20,7 @@ from .conv import Conv, DWConv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init
 
-__all__ = "OBB", "Classify", "Detect", "Pose", "RTDETRDecoder", "Segment", "YOLOEDetect", "YOLOESegment", "v10Detect"
+__all__ = "OBB", "Classify", "Detect", "Pose", "RTDETRDecoder", "Segment", "YOLOEDetect", "YOLOESegment", "v10Detect", "JDE"
 
 
 class Detect(nn.Module):
@@ -250,6 +250,65 @@ class Detect(nn.Module):
         """Remove the one2many head for inference optimization."""
         self.cv2 = self.cv3 = None
 
+class JDE(Detect):
+    def __init__(self, nc:int=80, emb_size: int=128, reg_max=16, end2end=False, ch: tuple=(), ):
+        """ 
+        """
+        print(nc, emb_size, reg_max, end2end, ch)
+        super().__init__(nc=nc, reg_max=reg_max, end2end=end2end, ch=ch)
+        self.emb_size = emb_size
+        c3 = max(ch[0], min(self.nc, 100))
+        self.cv4 =  (
+            nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.emb_size, 1)) for x in ch)
+            if self.legacy
+            else nn.ModuleList(
+                nn.Sequential(
+                    nn.Sequential(DWConv(x, x, 3), Conv(x, c3, 1)),
+                    nn.Sequential(DWConv(c3, c3, 3), Conv(c3, c3, 1)),
+                    nn.Conv2d(c3, self.emb_size, 1),
+                )
+                for x in ch
+            )
+        )
+        if end2end:
+            self.one2one_cv4 = copy.deepcopy(self.cv4)
+    
+    @property
+    def one2many(self):
+        """Returns the one-to-many head components, here for v3/v5/v8/v9/v11 backward compatibility."""
+        return dict(box_head=self.cv2, cls_head=self.cv3, emb_head=self.cv4)
+
+    @property
+    def one2one(self):
+        """Returns the one-to-one head components."""
+        return dict(box_head=self.one2one_cv2, cls_head=self.one2one_cv3, emb_head=self.one2one_cv4)
+    
+    def forward_head(
+        self, x: list[torch.Tensor], box_head: torch.nn.Module = None, cls_head: torch.nn.Module = None, emb_head: torch.nn.Module = None
+    ) -> dict[str, torch.Tensor]:
+        """Concatenates and returns predicted bounding boxes and class probabilities."""
+        if box_head is None or cls_head is None or emb_head is None:  # for fused inference
+            return dict()
+        bs = x[0].shape[0]  # batch size
+        boxes = torch.cat([box_head[i](x[i]).view(bs, 4 * self.reg_max, -1) for i in range(self.nl)], dim=-1)
+        scores = torch.cat([cls_head[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1)
+        embs = torch.cat([emb_head[i](x[i]).view(bs, self.emb_size, -1) for i in range(self.nl)], dim=-1)
+        return dict(boxes=boxes, scores=scores, feats=x, embs=embs)
+    
+    def fuse(self) -> None:
+        """Remove the one2many head for inference optimization."""
+        self.cv2 = self.cv3 = self.cv4 = None
+
+    def _inference(self, x):
+        dbox = self._get_decode_boxes(x)
+        return torch.cat((dbox, x['scores'].sigmoid(), x['embs']), 1)
+
+    def postprocess(self, preds):
+        boxes, scores, embs = preds.split([4, self.nc, self.emb_size], dim=-1)
+        scores, conf, idx = self.get_topk_index(scores, self.max_det)
+        boxes = boxes.gather(dim=1, index=idx.repeat(1, 1, 4))
+        embs = embs.gather(dim=1, index=idx.repeat(1, 1, self.emb_size))
+        return torch.cat([boxes, scores, conf, embs], dim=-1)
 
 class Segment(Detect):
     """YOLO Segment head for segmentation models.
