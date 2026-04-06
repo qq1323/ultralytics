@@ -119,7 +119,7 @@ class YOLO(Model):
             "jde": {
                 "model": JDEModel,
                 "trainer": yolo.jde.JDETrainer,
-                "validator": yolo.detect.DetectionValidator,
+                "validator": yolo.jde.JDEValidator,
                 "predictor": yolo.jde.JDEPredictor
             }
         }

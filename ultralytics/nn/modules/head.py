@@ -254,7 +254,6 @@ class JDE(Detect):
     def __init__(self, nc:int=80, emb_size: int=128, reg_max=16, end2end=False, ch: tuple=(), ):
         """ 
         """
-        print(nc, emb_size, reg_max, end2end, ch)
         super().__init__(nc=nc, reg_max=reg_max, end2end=end2end, ch=ch)
         self.emb_size = emb_size
         c3 = max(ch[0], min(self.nc, 100))
