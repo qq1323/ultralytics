@@ -266,7 +266,7 @@ class Results(SimpleClass, DataExportMixin):
         self.names = names
         self.path = path
         self.save_dir = None
-        self._keys = "boxes", "masks", "probs", "keypoints", "obb"
+        self._keys = "boxes", "masks", "probs", "keypoints", "obb", "embeds"
 
     def __getitem__(self, idx):
         """Return a Results object for a specific index of inference results.
@@ -1553,7 +1553,7 @@ class Embeddings(BaseTensor):
         normalize(): Normalizes the embeddings to have a unit norm.
     """
 
-    def __init__(self, embeddings) -> None:
+    def __init__(self, embeddings, orig_shape=None) -> None:
         """
         Initialize the Embeddings class with detection embeddings.
 
@@ -1561,13 +1561,14 @@ class Embeddings(BaseTensor):
 
         Args:
             embeddings (torch.Tensor | np.ndarray): A tensor or numpy array with detection embeddings of shape (num_boxes, embedding_dim).
+            orig_shape (tuple, optional): Original image shape. Defaults to None.
 
         Examples:
             >>> import torch
             >>> embeddings = torch.rand(10, 256)  # 10 embeddings of 256 dimensions
             >>> embeddings_obj = Embeddings(embeddings)
         """
-        super().__init__(embeddings, orig_shape=None)
+        super().__init__(embeddings, orig_shape=orig_shape)
 
     def normalize(self):
         """

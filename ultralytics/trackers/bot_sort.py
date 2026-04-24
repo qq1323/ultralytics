@@ -202,6 +202,12 @@ class BOTSORT(BYTETracker):
             return []
         bboxes = results.xywhr if hasattr(results, "xywhr") else results.xywh
         bboxes = np.concatenate([bboxes, np.arange(len(bboxes)).reshape(-1, 1)], axis=-1)
+
+        # Use embeddings directly from results (e.g., JDE model output)
+        if hasattr(results, "embeds") and results.embeds is not None and len(results.embeds):
+            features_keep = [f.cpu().numpy() for f in results.embeds]
+            return [BOTrack(xywh, s, c, f) for (xywh, s, c, f) in zip(bboxes, results.conf, results.cls, features_keep)]
+
         if self.args.with_reid and self.encoder is not None:
             features_keep = self.encoder(img, bboxes)
             return [BOTrack(xywh, s, c, f) for (xywh, s, c, f) in zip(bboxes, results.conf, results.cls, features_keep)]
