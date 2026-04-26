@@ -19,15 +19,38 @@ from .tal import bbox2dist, rbox2dist
 
 
 class MetricLearningLoss(nn.Module):
+    """Metric learning loss for training embedding features in JDE models.
+
+    Implements triplet loss with hard negative mining to learn discriminative
+    feature embeddings for object re-identification and tracking applications.
+
+    Attributes:
+        mining_func: BatchEasyHardMiner for selecting informative triplet samples.
+        loss_func: TripletMarginLoss for computing triplet similarity loss.
+        confidence_threshold: Threshold for selecting high-confidence detections
+            for embedding loss computation (default: 1.0, use all detections).
+    """
+
     def __init__(self):
-        super(MetricLearningLoss, self).__init__()
-        self.mining_func = miners.BatchEasyHardMiner(pos_strategy='hard', neg_strategy='semihard')
+        """Initialize MetricLearningLoss with triplet loss and hard miner."""
+        super().__init__()
+        self.mining_func = miners.BatchEasyHardMiner(pos_strategy="hard", neg_strategy="semihard")
         self.loss_func = losses.TripletMarginLoss(margin=0.075)
-        self.confidence_threshold = 1
+        self.confidence_threshold = 1.0
 
     def forward(self, embeddings, tags, confidences=None, normalize=False):
-        # Select only the embeddings and tags for confidences on top X%
-        if confidences is not None and self.confidence_threshold<1:
+        """Compute metric learning loss for embedding features.
+
+        Args:
+            embeddings (torch.Tensor): Feature embeddings with shape (N, D).
+            tags (torch.Tensor): Class labels with shape (N,).
+            confidences (torch.Tensor, optional): Confidence scores for filtering.
+            normalize (bool): Whether to L2-normalize embeddings.
+
+        Returns:
+            (torch.Tensor): Scalar triplet loss value.
+        """
+        if confidences is not None and self.confidence_threshold < 1:
             top_k = int(self.confidence_threshold * len(confidences))
             _, indices = torch.topk(confidences, top_k, largest=True)
             embeddings = embeddings[indices]
@@ -35,11 +58,9 @@ class MetricLearningLoss(nn.Module):
 
         if normalize:
             embeddings = F.normalize(embeddings, p=2, dim=1)
-        # Sample triplets and calculate loss
+
         indices_tuples = self.mining_func(embeddings, tags)
-        loss = self.loss_func(embeddings, tags, indices_tuples)
-        #loss = self.loss_func(embeddings, tags)
-        return loss
+        return self.loss_func(embeddings, tags, indices_tuples)
 
 
 class VarifocalLoss(nn.Module):
@@ -493,21 +514,49 @@ class v8DetectionLoss:
         return loss * batch_size, loss_detach
 
 class v8JdeLoss(v8DetectionLoss):
-    """Criterion class for computing training losses for YOLOv8 Joint detection and embedding."""
-    def __init__(self, model, tal_topk = 10, tal_topk2 = None, level='image'):
+    """Criterion class for computing training losses for YOLOv8 Joint Detection and Embedding.
+
+    Extends v8DetectionLoss by adding metric learning loss for training discriminative
+    feature embeddings alongside standard detection losses.
+
+    Attributes:
+        emb_loss (MetricLearningLoss): Triplet loss for embedding learning.
+        level (str): Processing level for embedding loss, 'image' or 'batch'.
+    """
+
+    def __init__(self, model, tal_topk=10, tal_topk2=None, level="image"):
+        """Initialize JDE loss with embedding learning capability.
+
+        Args:
+            model: The JDE model containing stride and other config.
+            tal_topk (int): Top-k targets for assignment per anchor.
+            tal_topk2 (int, optional): Second top-k parameter for assignment.
+            level (str): Processing level for embedding loss:
+                'image' - compute loss per image and average (default)
+                'batch' - compute loss across entire batch at once
+        """
         super().__init__(model, tal_topk, tal_topk2)
         self.emb_loss = MetricLearningLoss().to(self.device)
         self.level = level
-    
+
     def get_assigned_targets_and_loss(self, preds: dict[str, torch.Tensor], batch: dict[str, Any]) -> tuple:
-        """Calculate the sum of the loss for box, cls and dfl multiplied by batch size and return foreground mask and
-        target indices.
+        """Calculate combined detection and embedding loss.
+
+        Args:
+            preds (dict[str, torch.Tensor]): Model predictions containing boxes, scores, and embs.
+            batch (dict[str, Any]): Batch data containing ground truth labels and boxes.
+
+        Returns:
+            (tuple): Tuple containing (assignments, loss, loss_detach) where:
+                - assignments: Tuple with fg_mask, target_gt_idx, target_bboxes, etc.
+                - loss: Combined loss tensor with shape (4,) for [box, cls, dfl, emb].
+                - loss_detach: Detached loss tensor for logging.
         """
-        loss = torch.zeros(4, device=self.device)  # box, cls, dfl
+        loss = torch.zeros(4, device=self.device)  # box, cls, dfl, emb
         pred_distri, pred_scores, pred_embs = (
             preds["boxes"].permute(0, 2, 1).contiguous(),
             preds["scores"].permute(0, 2, 1).contiguous(),
-            preds['embs'].permute(0, 2, 1).contiguous()
+            preds["embs"].permute(0, 2, 1).contiguous(),
         )
         anchor_points, stride_tensor = make_anchors(preds["feats"], self.stride, 0.5)
 
@@ -521,7 +570,7 @@ class v8JdeLoss(v8DetectionLoss):
         gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
         mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
 
-        # Pboxes
+        # Predict boxes
         pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
 
         target_labels, target_bboxes, target_scores, fg_mask, target_gt_idx = self.assigner(
@@ -535,10 +584,10 @@ class v8JdeLoss(v8DetectionLoss):
 
         target_scores_sum = max(target_scores.sum(), 1)
 
-        # Cls loss
-        loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        # Classification loss
+        loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum
 
-        # Bbox loss
+        # Box and DFL loss
         if fg_mask.sum():
             loss[0], loss[2] = self.bbox_loss(
                 pred_distri,
@@ -552,14 +601,14 @@ class v8JdeLoss(v8DetectionLoss):
                 stride_tensor,
             )
 
-            # embedding loss
+            # Embedding loss
             if self.level == "batch":
-                pred_embs = pred_embs[fg_mask]  # (batch_fg_objects, embed_dim)
-                target_tags = target_labels[fg_mask]  # (batch_fg_objects, 1)
-                confidences = pred_scores[fg_mask].sigmoid().view(-1)   # (batch_fg_objects,)
+                pred_embs = pred_embs[fg_mask]
+                target_tags = target_labels[fg_mask]
+                confidences = pred_scores[fg_mask].sigmoid().view(-1)
                 loss[3] = self.emb_loss(pred_embs, target_tags, confidences)
             else:
-                loss_sum = 0
+                loss_sum = 0.0
                 for i in range(batch_size):
                     fg_m_image = fg_mask[i]
                     if fg_m_image.sum():
@@ -569,15 +618,16 @@ class v8JdeLoss(v8DetectionLoss):
                         loss_sum += self.emb_loss(pred_embed, target_tag, confidence)
                 loss[3] = loss_sum / batch_size
 
+        # Apply loss gains
         loss[0] *= self.hyp.box  # box gain
         loss[1] *= self.hyp.cls  # cls gain
         loss[2] *= self.hyp.dfl  # dfl gain
-        loss[3] *= self.hyp.cls  # emb gain
+        loss[3] *= self.hyp.cls  # emb gain (using cls gain for now)
         return (
             (fg_mask, target_gt_idx, target_bboxes, anchor_points, stride_tensor),
             loss,
             loss.detach(),
-        )  # loss(box, cls, dfl)
+        )
 
 class v8SegmentationLoss(v8DetectionLoss):
     """Criterion class for computing training losses for YOLOv8 segmentation."""

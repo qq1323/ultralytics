@@ -517,10 +517,11 @@ class DetectionModel(BaseModel):
 
 
 class JDEModel(DetectionModel):
-    """ YOLO 检测和特征提取模型.
-    
-    This class implements the YOLO JDE architecture, handling model initialization, forward pass, augmented
-    inference, and loss computation for object detection tasks.
+    """YOLO Joint Detection and Embedding model.
+
+    This class implements the YOLO JDE architecture for simultaneous object detection
+    and feature embedding extraction. It extends DetectionModel by adding specialized
+    loss computation for joint detection and embedding learning.
 
     Attributes:
         yaml (dict): Model configuration dictionary.
@@ -532,20 +533,25 @@ class JDEModel(DetectionModel):
         stride (torch.Tensor): Model stride values.
 
     Methods:
-        __init__: Initialize the YOLO detection model.
-        _predict_augment: Perform augmented inference.
-        _descale_pred: De-scale predictions following augmented inference.
-        _clip_augmented: Clip YOLO augmented inference tails.
-        init_criterion: Initialize the loss criterion.
+        init_criterion: Initialize the JDE loss criterion.
 
     Examples:
-        Initialize a detection model
-        >>> model = DetectionModel("yolo26n.yaml", ch=3, emb=128, nc=80)
+        Initialize a JDE model
+        >>> model = JDEModel("yolo26n-jde.yaml", ch=3, nc=80)
         >>> results = model.predict(image_tensor)
     """
+
     def init_criterion(self):
+        """Initialize the loss criterion for JDE model training.
+
+        Returns:
+            (v8JdeLoss): JDE loss function combining detection and embedding losses.
+
+        Raises:
+            NotImplementedError: If end2end detection mode is enabled (not yet supported).
+        """
         if getattr(self, "end2end", False):
-            raise NotImplementedError
+            raise NotImplementedError("End-to-end detection is not yet supported for JDE models.")
         return v8JdeLoss(self)
 
 

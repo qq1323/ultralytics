@@ -251,13 +251,44 @@ class Detect(nn.Module):
         self.cv2 = self.cv3 = None
 
 class JDE(Detect):
-    def __init__(self, nc:int=80, emb_size: int=128, reg_max=16, end2end=False, ch: tuple=(), ):
-        """ 
+    """YOLO Joint Detection and Embedding head.
+
+    This class extends the Detect head to include feature embedding capabilities for
+    each detected object. It outputs bounding boxes, class probabilities, and feature
+    embeddings simultaneously, enabling applications like multi-object tracking and
+    person re-identification.
+
+    Attributes:
+        emb_size (int): Dimension of the output feature embedding vector.
+        cv4 (nn.ModuleList): Convolutional layers for embedding prediction.
+        one2one_cv4 (nn.ModuleList): One-to-one convolution layers for embedding (for end2end mode).
+
+    Methods:
+        forward_head: Forward pass through box, class, and embedding heads.
+        _inference: Decode boxes and concatenate with scores and embeddings.
+        postprocess: Apply NMS and select top-k detections with embeddings.
+
+    Examples:
+        Create a JDE head
+        >>> jde = JDE(nc=80, emb_size=128, ch=(256, 512, 1024))
+        >>> x = [torch.randn(1, 256, 80, 80), torch.randn(1, 512, 40, 40)]
+        >>> outputs = jde(x)
+    """
+
+    def __init__(self, nc: int = 80, emb_size: int = 128, reg_max=16, end2end=False, ch: tuple = ()):
+        """Initialize the JDE detection head with embedding capabilities.
+
+        Args:
+            nc (int): Number of classes.
+            emb_size (int): Dimension of the feature embedding vector.
+            reg_max (int): Maximum distribution value for DFL.
+            end2end (bool): Whether to use end-to-end NMS-free detection.
+            ch (tuple): Tuple of channel sizes from backbone feature maps.
         """
         super().__init__(nc=nc, reg_max=reg_max, end2end=end2end, ch=ch)
         self.emb_size = emb_size
         c3 = max(ch[0], min(self.nc, 100))
-        self.cv4 =  (
+        self.cv4 = (
             nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.emb_size, 1)) for x in ch)
             if self.legacy
             else nn.ModuleList(
@@ -271,38 +302,68 @@ class JDE(Detect):
         )
         if end2end:
             self.one2one_cv4 = copy.deepcopy(self.cv4)
-    
+
     @property
     def one2many(self):
-        """Returns the one-to-many head components, here for v3/v5/v8/v9/v11 backward compatibility."""
+        """Returns the one-to-many head components for training."""
         return dict(box_head=self.cv2, cls_head=self.cv3, emb_head=self.cv4)
 
     @property
     def one2one(self):
-        """Returns the one-to-one head components."""
+        """Returns the one-to-one head components for end2end inference."""
         return dict(box_head=self.one2one_cv2, cls_head=self.one2one_cv3, emb_head=self.one2one_cv4)
-    
+
     def forward_head(
-        self, x: list[torch.Tensor], box_head: torch.nn.Module = None, cls_head: torch.nn.Module = None, emb_head: torch.nn.Module = None
+        self,
+        x: list[torch.Tensor],
+        box_head: torch.nn.Module = None,
+        cls_head: torch.nn.Module = None,
+        emb_head: torch.nn.Module = None,
     ) -> dict[str, torch.Tensor]:
-        """Concatenates and returns predicted bounding boxes and class probabilities."""
-        if box_head is None or cls_head is None or emb_head is None:  # for fused inference
+        """Forward pass through box, class, and embedding heads.
+
+        Args:
+            x (list[torch.Tensor]): List of feature maps from different levels.
+            box_head (nn.ModuleList, optional): Box regression head.
+            cls_head (nn.ModuleList, optional): Classification head.
+            emb_head (nn.ModuleList, optional): Embedding head.
+
+        Returns:
+            (dict[str, torch.Tensor]): Dictionary containing boxes, scores, features, and embeddings.
+        """
+        if box_head is None or cls_head is None or emb_head is None:
             return dict()
         bs = x[0].shape[0]  # batch size
         boxes = torch.cat([box_head[i](x[i]).view(bs, 4 * self.reg_max, -1) for i in range(self.nl)], dim=-1)
         scores = torch.cat([cls_head[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1)
         embs = torch.cat([emb_head[i](x[i]).view(bs, self.emb_size, -1) for i in range(self.nl)], dim=-1)
         return dict(boxes=boxes, scores=scores, feats=x, embs=embs)
-    
+
     def fuse(self) -> None:
-        """Remove the one2many head for inference optimization."""
+        """Remove training heads for inference optimization."""
         self.cv2 = self.cv3 = self.cv4 = None
 
-    def _inference(self, x):
-        dbox = self._get_decode_boxes(x)
-        return torch.cat((dbox, x['scores'].sigmoid(), x['embs']), 1)
+    def _inference(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Decode boxes and concatenate with class scores and embeddings.
 
-    def postprocess(self, preds):
+        Args:
+            x (dict[str, torch.Tensor]): Dictionary containing scores and decoded boxes.
+
+        Returns:
+            (torch.Tensor): Concatenated tensor with shape (batch, 4 + nc + emb_size, num_anchors).
+        """
+        dbox = self._get_decode_boxes(x)
+        return torch.cat((dbox, x["scores"].sigmoid(), x["embs"]), 1)
+
+    def postprocess(self, preds: torch.Tensor) -> torch.Tensor:
+        """Apply top-k selection and gather corresponding boxes, scores, and embeddings.
+
+        Args:
+            preds (torch.Tensor): Raw predictions with shape (batch, num_detections, 4 + nc + emb_size).
+
+        Returns:
+            (torch.Tensor): Post-processed predictions with top-k detections.
+        """
         boxes, scores, embs = preds.split([4, self.nc, self.emb_size], dim=-1)
         scores, conf, idx = self.get_topk_index(scores, self.max_det)
         boxes = boxes.gather(dim=1, index=idx.repeat(1, 1, 4))
