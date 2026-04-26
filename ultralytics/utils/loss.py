@@ -545,6 +545,7 @@ class v8JdeLoss(v8DetectionLoss):
         Args:
             preds (dict[str, torch.Tensor]): Model predictions containing boxes, scores, and embs.
             batch (dict[str, Any]): Batch data containing ground truth labels and boxes.
+                May also contain 'track_ids' for instance-level embedding learning.
 
         Returns:
             (tuple): Tuple containing (assignments, loss, loss_detach) where:
@@ -564,11 +565,26 @@ class v8JdeLoss(v8DetectionLoss):
         batch_size = pred_scores.shape[0]
         imgsz = torch.tensor(preds["feats"][0].shape[2:], device=self.device, dtype=dtype) * self.stride[0]
 
-        # Targets
+        # Check if track_ids are available for instance-level embedding learning
+        has_track_ids = "track_ids" in batch and batch["track_ids"].shape[0] > 0
+
+        # Targets for detection
         targets = torch.cat((batch["batch_idx"].view(-1, 1), batch["cls"].view(-1, 1), batch["bboxes"]), 1)
         targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
         gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
         mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
+
+        # Process track_ids if available
+        gt_track_ids = None
+        if has_track_ids:
+            # Preprocess track_ids same way as cls and bboxes
+            track_targets = torch.cat(
+                (batch["batch_idx"].view(-1, 1), batch["track_ids"].view(-1, 1), batch["bboxes"]), 1
+            )
+            track_targets = self.preprocess(
+                track_targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]]
+            )
+            gt_track_ids, _ = track_targets.split((1, 4), 2)  # track_ids, xyxy
 
         # Predict boxes
         pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
@@ -581,6 +597,13 @@ class v8JdeLoss(v8DetectionLoss):
             gt_bboxes,
             mask_gt,
         )
+
+        # Assign track_ids for embedding learning
+        target_track_ids = target_labels  # Fallback to class labels
+        if has_track_ids and gt_track_ids is not None:
+            # Gather assigned track_ids using target_gt_idx
+            batch_idx = torch.arange(batch_size, device=self.device).view(-1, 1)
+            target_track_ids = gt_track_ids[batch_idx, target_gt_idx.long()]  # (b, h*w, 1)
 
         target_scores_sum = max(target_scores.sum(), 1)
 
@@ -604,7 +627,7 @@ class v8JdeLoss(v8DetectionLoss):
             # Embedding loss
             if self.level == "batch":
                 pred_embs = pred_embs[fg_mask]
-                target_tags = target_labels[fg_mask]
+                target_tags = target_track_ids[fg_mask]  # Use assigned track_ids or class labels
                 confidences = pred_scores[fg_mask].sigmoid().view(-1)
                 loss[3] = self.emb_loss(pred_embs, target_tags, confidences)
             else:
@@ -613,7 +636,7 @@ class v8JdeLoss(v8DetectionLoss):
                     fg_m_image = fg_mask[i]
                     if fg_m_image.sum():
                         pred_embed = pred_embs[i][fg_m_image]
-                        target_tag = target_labels[i][fg_m_image]
+                        target_tag = target_track_ids[i][fg_m_image]
                         confidence = pred_scores[i][fg_m_image].sigmoid().view(-1)
                         loss_sum += self.emb_loss(pred_embed, target_tag, confidence)
                 loss[3] = loss_sum / batch_size

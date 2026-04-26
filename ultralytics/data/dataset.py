@@ -298,7 +298,7 @@ class YOLODataset(BaseDataset):
                 value = torch.stack(value, 0)
             elif k == "visuals":
                 value = torch.nn.utils.rnn.pad_sequence(value, batch_first=True)
-            if k in {"masks", "keypoints", "bboxes", "cls", "segments", "obb"}:
+            if k in {"masks", "keypoints", "bboxes", "cls", "segments", "obb", "track_ids"}:
                 value = torch.cat(value, 0)
             new_batch[k] = value
         new_batch["batch_idx"] = list(new_batch["batch_idx"])
@@ -306,6 +306,74 @@ class YOLODataset(BaseDataset):
             new_batch["batch_idx"][i] += i  # add target image index for build_targets()
         new_batch["batch_idx"] = torch.cat(new_batch["batch_idx"], 0)
         return new_batch
+
+
+class JDEDataset(YOLODataset):
+    """Dataset for Joint Detection and Embedding (JDE) learning.
+
+    Extends YOLODataset with track_id support for instance-level embedding learning.
+    Supports both class-level (default) and instance-level (track_id based) identity
+    for metric learning loss functions.
+
+    Attributes:
+        use_track_id (bool): Whether to use track_id for identity labels instead of class.
+        data (dict): Dataset configuration dictionary containing JDE-specific settings.
+
+    Methods:
+        get_labels: Extend label loading to include track_id information.
+        update_labels_info: Update label format with track_id for JDE training.
+
+    Examples:
+        Create JDE dataset with track_id support
+        >>> dataset = JDEDataset(
+        ...     img_path="path/to/images",
+        ...     data={"names": {0: "person"}, "use_track_id": True},
+        ...     task="jde"
+        ... )
+    """
+
+    def __init__(self, *args, data: dict | None = None, task: str = "jde", **kwargs):
+        """Initialize JDE Dataset.
+
+        Args:
+            data (dict, optional): Dataset configuration dictionary.
+                Can contain JDE-specific settings like 'use_track_id'.
+            task (str): Task type, default 'jde'.
+        """
+        super().__init__(*args, data=data, task=task, **kwargs)
+        self.use_track_id = data.get("use_track_id", False) if data else False
+
+    def get_labels(self):
+        """Load labels with track_id support for JDE training.
+
+        Returns:
+            (list[dict]): List of label dictionaries with optional track_id information.
+        """
+        labels = super().get_labels()
+
+        for label in labels:
+            # 如果没有track_id，使用class_id作为默认identity
+            if "track_ids" not in label or label["track_ids"] is None or len(label["track_ids"]) == 0:
+                label["track_ids"] = label["cls"].copy()
+
+        return labels
+
+    def update_labels_info(self, label: dict) -> dict:
+        """Update label format with track_id for JDE training.
+
+        Args:
+            label (dict): Label dictionary containing bboxes, cls, and optional track_ids.
+
+        Returns:
+            (dict): Updated label dictionary with instances and track_ids.
+        """
+        labels = super().update_labels_info(label)
+
+        # 添加track_ids到instances
+        if "track_ids" in label:
+            labels["track_ids"] = label["track_ids"]
+
+        return labels
 
 
 class YOLOMultiModalDataset(YOLODataset):

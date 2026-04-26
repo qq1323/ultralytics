@@ -2100,6 +2100,11 @@ class Format:
         # Then we can use collate_fn
         if self.batch_idx:
             labels["batch_idx"] = torch.zeros(nl)
+        # Handle track_ids for JDE training
+        if "track_ids" in labels and labels["track_ids"] is not None and len(labels["track_ids"]) > 0:
+            labels["track_ids"] = (
+                torch.from_numpy(labels["track_ids"]) if nl else torch.zeros((nl, 1))
+            )
         return labels
 
     def _format_img(self, img: np.ndarray) -> torch.Tensor:
