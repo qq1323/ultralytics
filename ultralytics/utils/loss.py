@@ -13,7 +13,6 @@ from ultralytics.utils.metrics import OKS_SIGMA, RLE_WEIGHT
 from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh
 from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import autocast
-from pytorch_metric_learning import miners, losses
 from .metrics import bbox_iou, probiou
 from .tal import bbox2dist, rbox2dist
 
@@ -34,6 +33,7 @@ class MetricLearningLoss(nn.Module):
     def __init__(self):
         """Initialize MetricLearningLoss with triplet loss and hard miner."""
         super().__init__()
+        from pytorch_metric_learning import miners, losses
         self.mining_func = miners.BatchEasyHardMiner(pos_strategy="hard", neg_strategy="semihard")
         self.loss_func = losses.TripletMarginLoss(margin=0.075)
         self.confidence_threshold = 1.0
